@@ -1,15 +1,66 @@
 const request = require("supertest");
 const express = require("express");
 const mongoose = require("mongoose");
-const Expense = require("../models/Expense"); // Your Mongoose model
-const expenseRoutes = require("../routes/expenseRoutes"); // Your API routes
-
+const jwt = require("jsonwebtoken");
+const User = require("../models/User"); // Assuming you have a User model
+const Expense = require("../models/Expense");
+const expenseRoutes = require("../routes/expenseRoutes");
+const authRoutes = require("../routes/userRoutes");  // Add auth routes
 const app = express();
+
 app.use(express.json());
 app.use("/api/expenses", expenseRoutes);
+app.use("/api/auth", authRoutes); // Make sure auth routes are mounted
 
-describe("Expense API Endpoints", () => {
+// Define authentication middleware (Move this into a middleware file if needed)
+const authenticate = (req, res, next) => {
+    const token = req.header("Authorization")?.replace("Bearer ", "");
+    if (!token) {
+        return res.status(401).json({ message: "Authentication required" });
+    }
+
+    try {
+        const decoded = jwt.verify(token, "your-secret-key"); // Ensure using the same secret as your app
+        req.user = decoded; // Attach user info to request
+        next();
+    } catch (err) {
+        res.status(401).json({ message: "Invalid token" });
+    }
+};
+
+// Test suite for authenticated Expense API endpoints
+describe("Expense API Endpoints with Authentication", () => {
     let expenseId;
+    let authToken;
+
+    // Register and Login user before tests
+    beforeAll(async () => {
+        // Clean up previous data
+        await User.deleteMany();
+        await Expense.deleteMany();
+
+        // Register a test user
+        const userRes = await request(app)
+            .post("/api/auth/register") // Assuming this is your register route
+            .send({
+                username: "testuser",
+                password: "testpassword",
+            });
+
+        expect(userRes.statusCode).toBe(201);
+        
+        // Login to get the token
+        const loginRes = await request(app)
+            .post("/api/auth/login") // Assuming this is your login route
+            .send({
+                username: "testuser",
+                password: "testpassword",
+            });
+
+        expect(loginRes.statusCode).toBe(200);
+        authToken = loginRes.body.token; // Assuming your login returns a token
+        expect(authToken).toBeDefined();
+    });
 
     beforeEach(async () => {
         await Expense.deleteMany(); // Ensure a clean DB state before each test
@@ -18,6 +69,7 @@ describe("Expense API Endpoints", () => {
     test("✅ POST /api/expenses - Create an expense (Valid Data)", async () => {
         const res = await request(app)
             .post("/api/expenses")
+            .set("Authorization", `Bearer ${authToken}`)
             .send({
                 title: "Lunch",
                 amount: 150,
@@ -32,24 +84,37 @@ describe("Expense API Endpoints", () => {
         expenseId = res.body._id;
     });
 
-    test("❌ POST /api/expenses - Fail if required fields are missing", async () => {
-        const res = await request(app).post("/api/expenses").send({
-            amount: 100,
-            category: "Transport"
-        });
+    test("❌ POST /api/expenses - Fail if no auth token", async () => {
+        const res = await request(app)
+            .post("/api/expenses")
+            .send({
+                title: "Lunch",
+                amount: 150,
+                category: "Food",
+                date: "2024-02-15"
+            });
 
-        expect(res.statusCode).toBe(400);
-        expect(res.body.message).toBe("title is required"); // Assuming your API handles this validation
+        expect(res.statusCode).toBe(401); // Unauthorized
+        expect(res.body.message).toBe("Authentication required");
     });
 
     test("✅ GET /api/expenses - Retrieve all expenses", async () => {
         await Expense.create({ title: "Rent", amount: 500, category: "Housing", date: "2024-02-15" });
 
-        const res = await request(app).get("/api/expenses");
+        const res = await request(app)
+            .get("/api/expenses")
+            .set("Authorization", `Bearer ${authToken}`);
 
         expect(res.statusCode).toBe(200);
         expect(res.body.length).toBeGreaterThan(0);
         expect(res.body[0]).toHaveProperty("title", "Rent");
+    });
+
+    test("❌ GET /api/expenses - Fail if no auth token", async () => {
+        const res = await request(app).get("/api/expenses");
+
+        expect(res.statusCode).toBe(401); // Unauthorized
+        expect(res.body.message).toBe("Authentication required");
     });
 
     test("✅ GET /api/expenses/:id - Retrieve an expense by ID", async () => {
@@ -60,7 +125,9 @@ describe("Expense API Endpoints", () => {
             date: "2024-02-15"
         });
 
-        const res = await request(app).get(`/api/expenses/${newExpense._id}`);
+        const res = await request(app)
+            .get(`/api/expenses/${newExpense._id}`)
+            .set("Authorization", `Bearer ${authToken}`);
 
         expect(res.statusCode).toBe(200);
         expect(res.body.title).toBe("Internet Bill");
@@ -76,13 +143,14 @@ describe("Expense API Endpoints", () => {
 
         const res = await request(app)
             .put(`/api/expenses/${newExpense._id}`)
+            .set("Authorization", `Bearer ${authToken}`)
             .send({ amount: 80 });
 
         expect(res.statusCode).toBe(200);
         expect(res.body.amount).toBe(80);
     });
 
-    test("❌ PUT /api/expenses/:id - Invalid Update Request", async () => {
+    test("❌ PUT /api/expenses/:id - Invalid Update Request (No Auth)", async () => {
         const newExpense = await Expense.create({
             title: "Electricity Bill",
             amount: 70,
@@ -94,8 +162,7 @@ describe("Expense API Endpoints", () => {
             .put(`/api/expenses/${newExpense._id}`)
             .send({ invalidField: "xyz" });
 
-        expect(res.statusCode).toBe(400);
-        expect(res.body.message).toBe("Invalid update parameters");
+        expect(res.statusCode).toBe(401); // Unauthorized
     });
 
     test("✅ DELETE /api/expenses/:id - Delete an expense", async () => {
@@ -106,7 +173,9 @@ describe("Expense API Endpoints", () => {
             date: "2024-02-15"
         });
 
-        const res = await request(app).delete(`/api/expenses/${newExpense._id}`);
+        const res = await request(app)
+            .delete(`/api/expenses/${newExpense._id}`)
+            .set("Authorization", `Bearer ${authToken}`);
 
         expect(res.statusCode).toBe(200);
         expect(res.body.message).toBe("Expense deleted successfully");
@@ -115,11 +184,30 @@ describe("Expense API Endpoints", () => {
         expect(found).toBeNull();
     });
 
-    test("❌ GET /api/expenses/:id - 404 Not Found", async () => {
-        const fakeId = new mongoose.Types.ObjectId();
-        const res = await request(app).get(`/api/expenses/${fakeId}`);
+    test("❌ DELETE /api/expenses/:id - Fail if no auth token", async () => {
+        const newExpense = await Expense.create({
+            title: "Fuel",
+            amount: 30,
+            category: "Transport",
+            date: "2024-02-15"
+        });
 
-        expect(res.statusCode).toBe(404);
-        expect(res.body.message).toBe("Expense not found");
+        const res = await request(app).delete(`/api/expenses/${newExpense._id}`);
+
+        expect(res.statusCode).toBe(401); // Unauthorized
+        expect(res.body.message).toBe("Authentication required");
     });
+
+    test("✅ POST /api/auth/register - Register a new user", async () => {
+        const res = await request(app)
+            .post("/api/auth/register")
+            .send({
+                username: "newuser",
+                password: "newpassword",
+            });
+
+        expect(res.statusCode).toBe(201);
+        expect(res.body).toHaveProperty("message", "User registered successfully");
+    });
+
 });

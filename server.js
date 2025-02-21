@@ -4,7 +4,7 @@ const dotenv = require('dotenv');
 const connectDB = require('./config/db');
 const expenseRoutes = require('./routes/expenseRoutes');
 const setupSwagger = require('./config/swagger');
-
+const userRoutes = require('./routes/userRoutes'); 
 
 dotenv.config();
 connectDB();
@@ -13,6 +13,9 @@ const app = express();
 
 app.use(cors());
 app.use(express.json());
+
+app.use('/api/auth', userRoutes);
+
 
 app.use('/api/expenses', expenseRoutes);
 setupSwagger(app);
